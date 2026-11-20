@@ -125,3 +125,10 @@ config MTK_QOS_V2
 	  It supports BW prediction, BW bound detection, and BW limiter.
 	  It is also mapped with sspm qos v2.
 	  If unsure, say N.
+
+config BEGONIA_GPU_OC
+	bool "begonia: unlock the 850 MHz GPU OPP on the G90T"
+	default n
+	help
+	  Lets the MT6785T (Helio G90T) segment use GPU OPP 12 (850 MHz) instead
+	  of 15 (806 MHz). Personal overclock; ROM builds keep it off.
