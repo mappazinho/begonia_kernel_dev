@@ -1043,6 +1043,9 @@ KBUILD_CFLAGS	+= $(call cc-option,-fmacro-prefix-map=$(srctree)/=)
 # use the deterministic mode of AR if available
 KBUILD_ARFLAGS := $(call ar-option,D)
 
+ifdef CONFIG_OPLUS_FEATURE_SCHED_ASSIST
+KBUILD_CFLAGS += -DOPLUS_FEATURE_SCHED_ASSIST
+endif
 include scripts/Makefile.kasan
 include scripts/Makefile.extrawarn
 include scripts/Makefile.ubsan

@@ -728,6 +728,17 @@ struct uclamp_se {
 #endif /* CONFIG_UCLAMP_TASK */
 
 
+#ifdef OPLUS_FEATURE_SCHED_ASSIST
+extern int sysctl_sched_assist_enabled;
+extern int sysctl_sched_assist_scene;
+extern int sysctl_animation_type;
+extern int sysctl_slide_boost_enabled;
+extern int sysctl_boost_task_threshold;
+extern int sysctl_input_boost_enabled;
+extern int sysctl_uxchain_v2;
+extern void sched_assist_target_comm(struct task_struct *task);
+#endif /* OPLUS_FEATURE_SCHED_ASSIST */
+
 union rcu_special {
 	struct {
 		u8			blocked;
@@ -1406,6 +1417,19 @@ struct task_struct {
 	short nice_backup;
 	atomic_t inherit_types;
 #endif
+#ifdef OPLUS_FEATURE_SCHED_ASSIST
+	int ux_state;
+	atomic64_t inherit_ux;
+	struct list_head ux_entry;
+	int ux_depth;
+	u64 enqueue_time;
+	u64 inherit_ux_start;
+	int im_flag;
+	/* mmap-lock UX chain (kept for the core, not hooked) */
+	int ux_once;
+	u64 get_mmlock_ts;
+	int get_mmlock;
+#endif /* OPLUS_FEATURE_SCHED_ASSIST */
 
 	struct {
 		struct work_struct work;

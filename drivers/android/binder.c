@@ -77,6 +77,15 @@
 #include "binder_trace.h"
 #include <trace/hooks/binder.h>
 #include "../../kernel/sched/sched.h"
+#ifdef OPLUS_FEATURE_SCHED_ASSIST
+#include <linux/sched_assist/sched_assist_binder.h>
+
+static inline bool is_binder_proc_sf(struct binder_proc *proc)
+{
+	return proc && proc->tsk && strstr(proc->tsk->comm, "surfaceflinger") &&
+		task_uid(proc->tsk).val == 1000;
+}
+#endif /* OPLUS_FEATURE_SCHED_ASSIST */
 
 static HLIST_HEAD(binder_deferred_list);
 static DEFINE_MUTEX(binder_deferred_lock);
@@ -3053,8 +3062,17 @@ static int binder_proc_transaction(struct binder_transaction *t,
 	if (thread) {
 		binder_transaction_priority(thread, t, node);
 		binder_enqueue_thread_work_ilocked(thread, &t->work);
+#ifdef OPLUS_FEATURE_SCHED_ASSIST
+		if (sysctl_sched_assist_enabled && (!oneway || proc->proc_type))
+			binder_set_inherit_ux(thread->task, current);
+#endif /* OPLUS_FEATURE_SCHED_ASSIST */
 	} else if (!pending_async) {
 		binder_enqueue_work_ilocked(&t->work, &proc->todo);
+#ifdef OPLUS_FEATURE_SCHED_ASSIST
+		if (sysctl_sched_assist_enabled && (!oneway || proc->proc_type) &&
+		    proc->max_threads == 0)
+			binder_set_inherit_ux(proc->tsk, current);
+#endif /* OPLUS_FEATURE_SCHED_ASSIST */
 	} else {
 		if ((t->flags & TF_UPDATE_TXN) && proc->is_frozen) {
 			t_outdated = binder_find_outdated_transaction_ilocked(t,
@@ -3857,6 +3875,10 @@ static void binder_transaction(struct binder_proc *proc,
 			spin_unlock(&thread->prio_lock);
 		}
 		wake_up_interruptible_sync(&target_thread->wait);
+#ifdef OPLUS_FEATURE_SCHED_ASSIST
+		if (sysctl_sched_assist_enabled && !proc->proc_type)
+			binder_unset_inherit_ux(thread->task);
+#endif /* OPLUS_FEATURE_SCHED_ASSIST */
 		trace_android_vh_binder_restore_priority(in_reply_to, current);
 		binder_restore_priority(thread, &in_reply_to->saved_priority);
 		binder_free_transaction(in_reply_to);
@@ -4727,9 +4749,14 @@ static int binder_wait_for_work(struct binder_thread *thread,
 		prepare_to_wait(&thread->wait, &wait, TASK_INTERRUPTIBLE);
 		if (binder_has_work_ilocked(thread, do_proc_work))
 			break;
-		if (do_proc_work)
+		if (do_proc_work) {
 			list_add(&thread->waiting_thread_node,
 				 &proc->waiting_threads);
+#ifdef OPLUS_FEATURE_SCHED_ASSIST
+			if (sysctl_sched_assist_enabled)
+				binder_unset_inherit_ux(thread->task);
+#endif /* OPLUS_FEATURE_SCHED_ASSIST */
+		}
 		trace_android_vh_binder_wait_for_work(do_proc_work, thread, proc); 
 		binder_inner_proc_unlock(proc);
 		schedule();
@@ -5137,6 +5164,10 @@ retry:
 				task_tgid_nr_ns(sender,
 						task_active_pid_ns(current));
 		trace_android_vh_sync_txn_recvd(thread->task, t_from->task);
+#ifdef OPLUS_FEATURE_SCHED_ASSIST
+		if (sysctl_sched_assist_enabled)
+			binder_set_inherit_ux(thread->task, t_from->task);
+#endif /* OPLUS_FEATURE_SCHED_ASSIST */
 		} else {
 			trd->sender_pid = 0;
 		}
@@ -6164,6 +6195,9 @@ static int binder_open(struct inode *nodp, struct file *filp)
 	spin_lock_init(&proc->outer_lock);
 	get_task_struct(current->group_leader);
 	proc->tsk = current->group_leader;
+#ifdef OPLUS_FEATURE_SCHED_ASSIST
+	proc->proc_type = is_binder_proc_sf(proc) ? 1 : 0;
+#endif /* OPLUS_FEATURE_SCHED_ASSIST */
 	proc->cred = get_cred(filp->f_cred);
 	INIT_LIST_HEAD(&proc->todo);
 	init_waitqueue_head(&proc->freeze_wait);

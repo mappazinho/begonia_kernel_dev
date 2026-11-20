@@ -96,6 +96,9 @@ void __init_rwsem(struct rw_semaphore *sem, const char *name,
 #ifdef CONFIG_MTK_TASK_TURBO
 	sem->turbo_owner = NULL;
 #endif
+#ifdef OPLUS_FEATURE_SCHED_ASSIST
+	sem->ux_dep_task = NULL;
+#endif /* OPLUS_FEATURE_SCHED_ASSIST */
 }
 
 EXPORT_SYMBOL(__init_rwsem);
@@ -266,6 +269,11 @@ __rwsem_down_read_failed_common(struct rw_semaphore *sem, int state)
 		adjustment += RWSEM_WAITING_BIAS;
 #ifdef CONFIG_MTK_TASK_TURBO
 	rwsem_list_add(waiter.task, &waiter.list, &sem->wait_list);
+#elif defined(OPLUS_FEATURE_SCHED_ASSIST)
+	if (sysctl_sched_assist_enabled)
+		rwsem_list_add(waiter.task, &waiter.list, &sem->wait_list);
+	else
+		list_add_tail(&waiter.list, &sem->wait_list);
 #else
 	list_add_tail(&waiter.list, &sem->wait_list);
 #endif
@@ -283,6 +291,10 @@ __rwsem_down_read_failed_common(struct rw_semaphore *sem, int state)
 	    (count > RWSEM_WAITING_BIAS &&
 	     adjustment != -RWSEM_ACTIVE_READ_BIAS))
 		__rwsem_mark_wake(sem, RWSEM_WAKE_ANY, &wake_q);
+#ifdef OPLUS_FEATURE_SCHED_ASSIST
+	if (sysctl_sched_assist_enabled)
+		rwsem_set_inherit_ux(current, waiter.task, READ_ONCE(sem->owner), sem);
+#endif /* OPLUS_FEATURE_SCHED_ASSIST */
 
 #ifdef CONFIG_MTK_TASK_TURBO
 	if (waiter.task)
@@ -558,6 +570,11 @@ __rwsem_down_write_failed_common(struct rw_semaphore *sem, int state)
 
 #ifdef CONFIG_MTK_TASK_TURBO
 	rwsem_list_add(waiter.task, &waiter.list, &sem->wait_list);
+#elif defined(OPLUS_FEATURE_SCHED_ASSIST)
+	if (sysctl_sched_assist_enabled)
+		rwsem_list_add(waiter.task, &waiter.list, &sem->wait_list);
+	else
+		list_add_tail(&waiter.list, &sem->wait_list);
 #else
 	list_add_tail(&waiter.list, &sem->wait_list);
 #endif
@@ -590,6 +607,10 @@ __rwsem_down_write_failed_common(struct rw_semaphore *sem, int state)
 
 	} else
 		count = atomic_long_add_return(RWSEM_WAITING_BIAS, &sem->count);
+#ifdef OPLUS_FEATURE_SCHED_ASSIST
+	if (sysctl_sched_assist_enabled)
+		rwsem_set_inherit_ux(waiter.task, current, READ_ONCE(sem->owner), sem);
+#endif /* OPLUS_FEATURE_SCHED_ASSIST */
 
 #ifdef CONFIG_MTK_TASK_TURBO
 	/* inherit if current is turbo */
@@ -719,6 +740,10 @@ locked:
 
 	if (!list_empty(&sem->wait_list))
 		__rwsem_mark_wake(sem, RWSEM_WAKE_ANY, &wake_q);
+#ifdef OPLUS_FEATURE_SCHED_ASSIST
+	if (sysctl_sched_assist_enabled)
+		rwsem_unset_inherit_ux(sem, current);
+#endif /* OPLUS_FEATURE_SCHED_ASSIST */
 
 	raw_spin_unlock_irqrestore(&sem->wait_lock, flags);
 	wake_up_q(&wake_q);

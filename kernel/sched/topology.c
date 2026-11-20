@@ -6,6 +6,9 @@
 #include <linux/mutex.h>
 
 #include "sched.h"
+#ifdef OPLUS_FEATURE_SCHED_ASSIST
+extern void update_ux_sched_cputopo(void);
+#endif /* OPLUS_FEATURE_SCHED_ASSIST */
 #include "../../drivers/misc/mediatek/base/power/include/mtk_upower.h"
 
 DEFINE_MUTEX(sched_domains_mutex);
@@ -1900,6 +1903,9 @@ build_sched_domains(const struct cpumask *cpu_map, struct sched_domain_attr *att
 		update_asym_cpucapacity(cpumask_first(cpu_map));
 
 	ret = 0;
+#ifdef OPLUS_FEATURE_SCHED_ASSIST
+	update_ux_sched_cputopo();
+#endif /* OPLUS_FEATURE_SCHED_ASSIST */
 error:
 	__free_domain_allocs(&d, alloc_state, cpu_map);
 	return ret;

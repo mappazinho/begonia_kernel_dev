@@ -41,6 +41,13 @@
 #include "walt.h"
 #include "eas_plus.h"
 #include "hmp.h"
+#ifdef OPLUS_FEATURE_SCHED_ASSIST
+#include <linux/sched_assist/sched_assist_common.h>
+#ifndef LB_UX_BOOST
+#define LB_UX_BOOST	(0x80 << LB_POLICY_SHIFT)
+#endif
+bool ux_task_misfit(struct task_struct *p, int cpu);
+#endif /* OPLUS_FEATURE_SCHED_ASSIST */
 
 /*
  * Targeted preemption latency for CPU-bound tasks:
@@ -3993,6 +4000,9 @@ place_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int initial)
 		se->vruntime = vruntime;
 	else
 		se->vruntime = max_vruntime(se->vruntime, vruntime);
+#ifdef OPLUS_FEATURE_SCHED_ASSIST
+	place_entity_adjust_ux_task(cfs_rq, se, initial);
+#endif /* OPLUS_FEATURE_SCHED_ASSIST */
 }
 
 static void check_enqueue_throttle(struct cfs_rq *cfs_rq);
@@ -4299,6 +4309,10 @@ pick_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *curr)
 		left = curr;
 
 	se = left; /* ideally we run the leftmost entity */
+#ifdef OPLUS_FEATURE_SCHED_ASSIST
+	if (should_ux_task_skip_further_check(se))
+		return se;
+#endif /* OPLUS_FEATURE_SCHED_ASSIST */
 
 	/*
 	 * Avoid running the skip buddy, if running something else can
@@ -5417,6 +5431,9 @@ enqueue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 
 		flags = ENQUEUE_WAKEUP;
 	}
+#ifdef OPLUS_FEATURE_SCHED_ASSIST
+	enqueue_ux_thread(rq, p);
+#endif /* OPLUS_FEATURE_SCHED_ASSIST */
 
 	for_each_sched_entity(se) {
 		cfs_rq = cfs_rq_of(se);
@@ -5493,6 +5510,9 @@ static void dequeue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 		}
 		flags |= DEQUEUE_SLEEP;
 	}
+#ifdef OPLUS_FEATURE_SCHED_ASSIST
+	dequeue_ux_thread(rq, p);
+#endif /* OPLUS_FEATURE_SCHED_ASSIST */
 
 	for_each_sched_entity(se) {
 		cfs_rq = cfs_rq_of(se);
@@ -7636,6 +7656,10 @@ static inline int find_best_target(struct task_struct *p, int *backup_cpu,
 
 			if(cpu_rq(i)->rt.rt_nr_running)
 				continue;
+#ifdef OPLUS_FEATURE_SCHED_ASSIST
+			if (should_ux_task_skip_cpu(p, i))
+				continue;
+#endif /* OPLUS_FEATURE_SCHED_ASSIST */
 			/*
 			 * p's blocked utilization is still accounted for on prev_cpu
 			 * so prev_cpu will receive a negative bias due to the double
@@ -8498,6 +8522,18 @@ pick_cpu:
 				p, prev_cpu, new_cpu);
 		select_reason = LB_HMP;
 	}
+#ifdef OPLUS_FEATURE_SCHED_ASSIST
+	/* heavy UX threads (WALT-free version of the slide boost) */
+	if (sysctl_sched_assist_enabled && is_heavy_ux_task(p) &&
+	    ux_task_misfit(p, new_cpu)) {
+		find_ux_task_cpu(p, &new_cpu);
+		select_reason = LB_UX_BOOST;
+	}
+	if (sysctl_sched_assist_scene & SA_LAUNCH) {
+		if (set_ux_task_to_prefer_cpu(p, &new_cpu))
+			select_reason = LB_UX_BOOST;
+	}
+#endif /* OPLUS_FEATURE_SCHED_ASSIST */
 
 	return select_reason | new_cpu;
 }
@@ -8709,6 +8745,12 @@ static void check_preempt_wakeup(struct rq *rq, struct task_struct *p, int wake_
 	find_matching_se(&se, &pse);
 	update_curr(cfs_rq_of(se));
 	BUG_ON(!pse);
+#ifdef OPLUS_FEATURE_SCHED_ASSIST
+	if (should_ux_preempt_wakeup(p, curr))
+		goto preempt;
+	else if (test_task_ux(curr))
+		return;
+#endif /* OPLUS_FEATURE_SCHED_ASSIST */
 	if (wakeup_preempt_entity(se, pse) == 1) {
 		/*
 		 * Bias pick_next to pick the sched entity that is
@@ -8799,6 +8841,9 @@ again:
 	} while (cfs_rq);
 
 	p = task_of(se);
+#ifdef OPLUS_FEATURE_SCHED_ASSIST
+	pick_ux_thread(rq, &p, &se);
+#endif /* OPLUS_FEATURE_SCHED_ASSIST */
 
 	/*
 	 * Since we haven't yet done put_prev_entity and if the selected task
@@ -9381,6 +9426,11 @@ static int detach_tasks(struct lb_env *env, struct rq_flags *rf)
 
 		if (!can_migrate_task(p, env))
 			goto next;
+
+#ifdef OPLUS_FEATURE_SCHED_ASSIST
+		if (should_ux_task_skip_cpu(p, env->dst_cpu))
+			goto next;
+#endif /* OPLUS_FEATURE_SCHED_ASSIST */
 
 		/*
 		 * Depending of the number of CPUs and tasks and the
@@ -12716,5 +12766,15 @@ __init void init_sched_fair_class(void)
 
 	arch_build_cpu_topology_domain();
 }
+#ifdef OPLUS_FEATURE_SCHED_ASSIST
+/* PELT version of Realme's WALT ux_task_misfit(): heavy UX on a little core */
+bool ux_task_misfit(struct task_struct *p, int cpu)
+{
+	int num_mincpu = cpumask_weight(topology_core_cpumask(0));
+
+	return cpu < num_mincpu && task_util(p) >= sysctl_boost_task_threshold;
+}
+
+#endif /* OPLUS_FEATURE_SCHED_ASSIST */
 #include "eas_plus.c"
 #include "hmp.c"

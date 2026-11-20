@@ -45,6 +45,9 @@ struct rw_semaphore {
 #ifdef CONFIG_DEBUG_LOCK_ALLOC
 	struct lockdep_map	dep_map;
 #endif
+#ifdef OPLUS_FEATURE_SCHED_ASSIST
+	struct task_struct *ux_dep_task;
+#endif /* OPLUS_FEATURE_SCHED_ASSIST */
 };
 
 /*
@@ -60,6 +63,9 @@ extern struct rw_semaphore *rwsem_down_write_failed_killable(struct rw_semaphore
 extern struct rw_semaphore *rwsem_wake(struct rw_semaphore *);
 extern struct rw_semaphore *rwsem_downgrade_wake(struct rw_semaphore *sem);
 
+#ifdef OPLUS_FEATURE_SCHED_ASSIST
+#include <linux/sched_assist/sched_assist_rwsem.h>
+#endif /* OPLUS_FEATURE_SCHED_ASSIST */
 /* Include the arch specific part */
 #include <asm/rwsem.h>
 

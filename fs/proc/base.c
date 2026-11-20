@@ -3093,6 +3093,10 @@ static int proc_turbo_task_show(struct seq_file *m, struct pid_namespace *ns,
 static const struct file_operations proc_task_operations;
 static const struct inode_operations proc_task_inode_operations;
 
+#ifdef OPLUS_FEATURE_SCHED_ASSIST
+extern const struct file_operations proc_ux_state_operations;
+#endif /* OPLUS_FEATURE_SCHED_ASSIST */
+
 static const struct pid_entry tgid_base_stuff[] = {
 	DIR("task",       S_IRUGO|S_IXUGO, proc_task_inode_operations, proc_task_operations),
 	DIR("fd",         S_IRUSR|S_IXUSR, proc_fd_inode_operations, proc_fd_operations),
@@ -3606,6 +3610,9 @@ static const struct pid_entry tid_base_stuff[] = {
 #ifdef CONFIG_MTK_TASK_TURBO
 	ONE("turbo", 0444, proc_turbo_task_show),
 #endif
+#ifdef OPLUS_FEATURE_SCHED_ASSIST
+	REG("ux_state", S_IRUGO | S_IWUGO, proc_ux_state_operations),
+#endif /* OPLUS_FEATURE_SCHED_ASSIST */
 };
 
 static int proc_tid_base_readdir(struct file *file, struct dir_context *ctx)

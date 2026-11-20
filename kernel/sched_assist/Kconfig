@@ -1,0 +1,8 @@
+config OPLUS_FEATURE_SCHED_ASSIST
+	bool "Oplus SchedAssist (UX thread scheduling)"
+	default n
+	help
+	  Oplus "uifirst" scheduling for UI, render and binder threads, ported
+	  from the Realme 7/8 Android S 4.14 kernel, with a ColorOS 16/17
+	  userspace interface (/proc/oplus_scheduler/sched_assist/ux_task,
+	  im_flag, /proc/<pid>/task/<tid>/ux_state).

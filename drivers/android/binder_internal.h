@@ -460,6 +460,9 @@ struct binder_proc {
 	struct hlist_node deferred_work_node;
 	int deferred_work;
 	int outstanding_txns;
+#ifdef OPLUS_FEATURE_SCHED_ASSIST
+	int proc_type;
+#endif /* OPLUS_FEATURE_SCHED_ASSIST */
 	bool is_dead;
 	bool is_frozen;
 	bool sync_recv;
