@@ -3746,7 +3746,9 @@ static int battery_callback(
 		{
 			/* charging enter error state */
 			battery_main.CHG_FULL_STATUS = false;
-			battery_main.BAT_STATUS = POWER_SUPPLY_STATUS_NOT_CHARGING;
+			/* romtool: no charging status without a charger (thermal stop, then unplugged) */
+			battery_main.BAT_STATUS = mt_charger_plugin() ?
+				POWER_SUPPLY_STATUS_NOT_CHARGING : POWER_SUPPLY_STATUS_DISCHARGING;
 			battery_update(&battery_main);
 		}
 		break;
@@ -3754,7 +3756,8 @@ static int battery_callback(
 		{
 			/* charging leave error state */
 			battery_main.CHG_FULL_STATUS = false;
-			battery_main.BAT_STATUS = POWER_SUPPLY_STATUS_CHARGING;
+			battery_main.BAT_STATUS = mt_charger_plugin() ?
+				POWER_SUPPLY_STATUS_CHARGING : POWER_SUPPLY_STATUS_DISCHARGING;
 			battery_update(&battery_main);
 
 		}
