@@ -1,0 +1,108 @@
+name: Build PoxaSuzaku (manual)
+
+# Same build as D:/cos17/sa/ksu/build_poxa.sh rom|oc + make_sa_zip.py on the owner's PC:
+# Ubuntu 24.04 clang 18.1.3, begonia_user_defconfig, ReSukiSU (KernelSU submodule) + SUSFS,
+# stack protector on (the vendor's force-loaded udc_lib.ko imports __stack_chk_guard/__stack_chk_fail).
+#   rom: -PoxaSuzaku     GPU stock 806 MHz (ROM boot.img / release zip)
+#   oc:  -PoxaSuzaku-OC  GPU 850 MHz (CONFIG_BEGONIA_GPU_OC, personal build)
+
+# Manual only (Actions tab -> Run workflow); pushes run the branch's own build-kernel.yml.
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Branch to build'
+        required: false
+        default: ''
+        type: string
+
+concurrency:
+  group: poxasuzaku-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: PoxaSuzaku ${{ matrix.variant }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [rom, oc]
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        ref: ${{ github.event.inputs.branch || github.ref_name }}
+        submodules: true
+
+    # KernelSU's Kbuild derives its version from git: rev-list --count (needs full history) and
+    # describe --tags (the tags live upstream). The submodule commit itself is on this repo's
+    # resukisu-sucompat branch (ReSukiSU v4.2.0-rc1 + the 4.14 SUSFS su-compat fix).
+    - name: KernelSU history and tags
+      run: |
+        git -C KernelSU fetch --unshallow -q || true
+        git -C KernelSU fetch -q --tags https://github.com/ReSukiSU/ReSukiSU
+        echo "KernelSU $(git -C KernelSU rev-parse --short=8 HEAD) $(git -C KernelSU describe --abbrev=0 --tags) count $(git -C KernelSU rev-list --count HEAD)"
+
+    - name: Toolchain
+      run: |
+        sudo apt-get update -q
+        sudo apt-get install -y -q clang-18 lld-18 llvm-18 bc bison flex libssl-dev libelf-dev cpio zip python3 device-tree-compiler
+        for t in clang ld.lld llvm-ar llvm-nm llvm-objcopy llvm-objdump llvm-strip; do sudo ln -sf /usr/bin/$t-18 /usr/local/bin/$t; done
+        clang --version | head -1
+
+    - name: Configure
+      run: |
+        if [ "${{ matrix.variant }}" = rom ]; then LV=-PoxaSuzaku; else LV=-PoxaSuzaku-OC; fi
+        make O=out ARCH=arm64 LLVM=1 CC=clang begonia_user_defconfig
+        sed -i -e '/^CONFIG_LOCALVERSION=/d' -e '/CONFIG_BEGONIA_GPU_OC/d' out/.config
+        echo "CONFIG_LOCALVERSION=\"$LV\"" >> out/.config
+        if [ "${{ matrix.variant }}" = oc ]; then echo CONFIG_BEGONIA_GPU_OC=y; else echo '# CONFIG_BEGONIA_GPU_OC is not set'; fi >> out/.config
+        make O=out ARCH=arm64 LLVM=1 CC=clang olddefconfig
+        grep -E 'CONFIG_(LOCALVERSION|BEGONIA_GPU_OC|CC_STACKPROTECTOR_STRONG|KSU|KSU_SUSFS|KSU_SUSFS_SUS_MOUNT|OPLUS_FEATURE_SCHED_ASSIST)[= ]|BEGONIA_GPU_OC is not' out/.config
+        grep -q '^CONFIG_CC_STACKPROTECTOR_STRONG=y' out/.config
+        ! grep -q '^CONFIG_KSU_SUSFS_SUS_MOUNT=y' out/.config
+
+    - name: Build
+      run: |
+        make -j$(nproc) O=out ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- \
+          LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip LLVM=1 LLVM_IAS=1 \
+          CFLAGS_KERNEL=-fintegrated-as CFLAGS_MODULE=-fintegrated-as
+
+    - name: Check image
+      run: |
+        python3 - <<'PY'
+        import re, zlib
+        k = open('out/arch/arm64/boot/Image.gz-dtb', 'rb').read()
+        d = zlib.decompressobj(16 + zlib.MAX_WBITS); img = d.decompress(k) + d.flush()
+        assert d.unused_data[:4] == b'\xd0\x0d\xfe\xed', 'no DTB after the gzip stream'
+        ver = re.search(rb'Linux version [^\n\x00]+', img).group(0).decode(); print(ver)
+        want = '-PoxaSuzaku-OC' if '${{ matrix.variant }}' == 'oc' else '-PoxaSuzaku'
+        assert ver.split()[2].endswith(want), ver
+        assert b'v4.2.0-rc1-023987f9@ReSukiSU' in img, 'not ReSukiSU v4.2.0-rc1 + su-compat fix'
+        assert b'susfs is initialized! version: v2.4.0' in img
+        syms = {l.split('\t')[1] for l in open('out/Module.symvers') if '\t' in l}
+        for s in ('__stack_chk_guard', '__stack_chk_fail', 'register_udc_functions', 'memset', 'printk'):
+            assert s in syms, 'kernel does not export %s (udc_lib.ko would not load)' % s
+        print('checks ok')
+        PY
+
+    - name: AnyKernel3 zip
+      run: |
+        if [ "${{ matrix.variant }}" = rom ]; then
+          N=PoxaSuzaku; KS='PoxaSuzaku (Suzaku V2 + SchedAssist + ReSukiSU + SUSFS)'
+        else
+          N=PoxaSuzaku-OC; KS='PoxaSuzaku OC (Suzaku V2 + SchedAssist + ReSukiSU + SUSFS, personal build, GPU 850 MHz)'
+        fi
+        Z=$N-$(date -u +%Y%m%d)-${GITHUB_SHA::8}
+        rm -rf AnyKernel3 && cp -a anykernel-template AnyKernel3
+        sed -i "s|^kernel\.string=.*|kernel.string=$KS|" AnyKernel3/anykernel.sh
+        cp out/arch/arm64/boot/Image.gz-dtb AnyKernel3/
+        (cd AnyKernel3 && zip -qr9 ../$Z.zip . -x '.git*')
+        sha256sum $Z.zip out/arch/arm64/boot/Image.gz-dtb
+        echo "ZIP=$Z" >> $GITHUB_ENV
+
+    - uses: actions/upload-artifact@v4
+      with:
+        name: ${{ env.ZIP }}
+        path: ${{ env.ZIP }}.zip
