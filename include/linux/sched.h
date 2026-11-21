@@ -1429,6 +1429,9 @@ struct task_struct {
 	int ux_once;
 	u64 get_mmlock_ts;
 	int get_mmlock;
+	/* lock this task got UX through (kept here, not in the lock: vendor modules use the stock lock layout) */
+	void *ux_dep_mutex;
+	void *ux_dep_rwsem;
 #endif /* OPLUS_FEATURE_SCHED_ASSIST */
 
 	struct {

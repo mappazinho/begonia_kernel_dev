@@ -45,9 +45,6 @@ struct rw_semaphore {
 #ifdef CONFIG_DEBUG_LOCK_ALLOC
 	struct lockdep_map	dep_map;
 #endif
-#ifdef OPLUS_FEATURE_SCHED_ASSIST
-	struct task_struct *ux_dep_task;
-#endif /* OPLUS_FEATURE_SCHED_ASSIST */
 };
 
 /*

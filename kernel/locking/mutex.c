@@ -46,9 +46,6 @@ __mutex_init(struct mutex *lock, const char *name, struct lock_class_key *key)
 #endif
 
 	debug_mutex_init(lock, name, key);
-#ifdef OPLUS_FEATURE_SCHED_ASSIST
-	lock->ux_dep_task = NULL;
-#endif /* OPLUS_FEATURE_SCHED_ASSIST */
 }
 EXPORT_SYMBOL(__mutex_init);
 

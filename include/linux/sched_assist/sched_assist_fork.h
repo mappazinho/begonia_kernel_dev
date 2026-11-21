@@ -9,6 +9,8 @@
 
 static inline void init_task_ux_info(struct task_struct *p)
 {
+	p->ux_dep_mutex = NULL;
+	p->ux_dep_rwsem = NULL;
 	p->ux_state = 0;
 	atomic64_set(&(p->inherit_ux), 0);
 	INIT_LIST_HEAD(&p->ux_entry);

@@ -54,7 +54,7 @@ void mutex_list_add(struct task_struct *task, struct list_head *entry, struct li
 #ifdef CONFIG_KERNEL_LOCK_OPT
 	if (is_ux) {
 #else
-	if (is_ux && !lock->ux_dep_task) {
+	if (is_ux) {
 #endif
 		mutex_list_add_ux(entry, head);
 	} else {
@@ -75,19 +75,19 @@ void mutex_set_inherit_ux(struct mutex *lock, struct task_struct *task)
 #else
 	owner = lock->owner;
 #endif
-	if (is_ux && !lock->ux_dep_task) {
+	if (is_ux && owner && !owner->ux_dep_mutex) {
 		int type = get_ux_state_type(owner);
 		if ((UX_STATE_NONE == type) || (UX_STATE_INHERIT == type)) {
 			set_inherit_ux(owner, INHERIT_UX_MUTEX, task->ux_depth, task->ux_state);
-			lock->ux_dep_task = owner;
+			owner->ux_dep_mutex = lock;
 		}
 	}
 }
 
 void mutex_unset_inherit_ux(struct mutex *lock, struct task_struct *task)
 {
-	if (lock && lock->ux_dep_task == task) {
+	if (lock && task && task->ux_dep_mutex == lock) {
 		unset_inherit_ux(task, INHERIT_UX_MUTEX);
-		lock->ux_dep_task = NULL;
+		task->ux_dep_mutex = NULL;
 	}
 }
