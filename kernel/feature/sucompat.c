@@ -341,6 +341,32 @@ int ksu_handle_execveat_sucompat(int *fd, struct filename **filename_ptr, void *
 #endif
 #endif
 
+// romtool: struct filename faccessat (fs/open.c inline SUSFS hook)
+#ifdef CONFIG_KSU_SUSFS
+int ksu_handle_faccessat(int *dfd, struct filename **filename, int *mode, int *__unused_flags)
+{
+#ifndef CONFIG_KSU_TRACEPOINT_HOOK
+    if (ksu_is_current_proc_unprivillege())
+        return 0;
+#endif
+#ifdef KSU_COMPAT_USE_STATIC_KEY
+    if (!static_branch_unlikely(&ksu_su_compat_enabled))
+        return 0;
+#else
+    if (!ksu_su_compat_enabled)
+        return 0;
+#endif
+    if (!ksu_is_allow_uid_for_current(ksu_get_uid_t(current_uid())))
+        return 0;
+    if (unlikely(IS_ERR(*filename) || (*filename)->name == NULL))
+        return 0;
+    if (likely(memcmp((*filename)->name, su_path, sizeof(su_path))))
+        return 0;
+    pr_info("faccessat su->sh!\n");
+    memcpy((void *)((*filename)->name), sh_path, sizeof(sh_path));
+    return 0;
+}
+#else
 int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *__unused_flags)
 {
     char path[sizeof(su_path) + 1] = { 0 };
@@ -376,7 +402,9 @@ int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode,
     return 0;
 }
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0) && defined(CONFIG_KSU_SUSFS)
+#endif // CONFIG_KSU_SUSFS faccessat
+
+#if defined(CONFIG_KSU_SUSFS) // romtool: inline SUSFS hooks pass struct filename on 4.14 too
 int ksu_handle_stat(int *dfd, struct filename **filename, int *flags)
 {
     if (ksu_is_current_proc_unprivillege()) {
