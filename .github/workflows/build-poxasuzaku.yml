@@ -5,6 +5,7 @@ name: Build PoxaSuzaku (manual)
 # stack protector on (the vendor's force-loaded udc_lib.ko imports __stack_chk_guard/__stack_chk_fail).
 #   rom: -PoxaSuzaku     GPU stock 806 MHz (ROM boot.img / release zip)
 #   oc:  -PoxaSuzaku-OC  GPU 850 MHz (CONFIG_BEGONIA_GPU_OC, personal build)
+#   rom-noksu / oc-noksu: the same without KernelSU and SUSFS (tag -noksu; NoMount stays on)
 
 # Manual only (Actions tab -> Run workflow); pushes run the branch's own build-kernel.yml.
 on:
@@ -16,7 +17,7 @@ on:
         default: ''
         type: string
       variants:
-        description: 'Kernels to build (JSON list)'
+        description: 'Kernels to build (JSON list of rom, oc, rom-noksu, oc-noksu)'
         required: false
         default: '["rom","oc"]'
         type: string
@@ -38,10 +39,6 @@ on:
         default: true
       inline:
         description: 'Raised inline thresholds (CONFIG_INLINE_OPTIMIZATION)'
-        type: boolean
-        default: true
-      ksu:
-        description: 'KernelSU (ReSukiSU) + SUSFS; off = no root in the kernel, tagged -noksu (NoMount stays on)'
         type: boolean
         default: true
 
@@ -80,7 +77,12 @@ jobs:
       run: |
         MTUNE=${{ github.event.inputs.mtune || 'cortex-a76' }}; OPT=${{ github.event.inputs.opt || 'O3' }}
         POLLY=${{ github.event.inputs.polly || 'true' }}; INLINE=${{ github.event.inputs.inline || 'true' }}
-        KSU=${{ github.event.inputs.ksu || 'true' }}
+        case "${{ matrix.variant }}" in
+          rom) GPU=stock; KSU=true;; oc) GPU=oc; KSU=true;;
+          rom-noksu) GPU=stock; KSU=false;; oc-noksu) GPU=oc; KSU=false;;
+          *) echo "::error::unknown variant '${{ matrix.variant }}' (rom, oc, rom-noksu, oc-noksu)"; exit 1;;
+        esac
+        echo "GPU=$GPU" >> $GITHUB_ENV
         T=""
         [ $MTUNE = cortex-a55 ] && T="$T-a55"
         [ $OPT = O2 ] && T="$T-O2"
@@ -91,15 +93,15 @@ jobs:
         echo "TAG=$T" >> $GITHUB_ENV
         echo "POLLY=$POLLY" >> $GITHUB_ENV; echo "INLINE=$INLINE" >> $GITHUB_ENV
         echo "KNOBS=POXA_MTUNE=$MTUNE POXA_OPT=-$OPT" >> $GITHUB_ENV
-        echo "variant tag: '${T:-none (release)}'  mtune=$MTUNE opt=-$OPT polly=$POLLY inline=$INLINE"
+        echo "variant tag: '${T:-none (release)}'  gpu=$GPU ksu=$KSU mtune=$MTUNE opt=-$OPT polly=$POLLY inline=$INLINE"
 
     - name: Configure
       run: |
-        if [ "${{ matrix.variant }}" = rom ]; then LV=-PoxaSuzaku$TAG; else LV=-PoxaSuzaku-OC$TAG; fi
+        if [ $GPU = stock ]; then LV=-PoxaSuzaku$TAG; else LV=-PoxaSuzaku-OC$TAG; fi
         make O=out ARCH=arm64 LLVM=1 CC=clang begonia_user_defconfig
         sed -i -e '/^CONFIG_LOCALVERSION=/d' -e '/CONFIG_BEGONIA_GPU_OC/d' out/.config
         echo "CONFIG_LOCALVERSION=\"$LV\"" >> out/.config
-        if [ "${{ matrix.variant }}" = oc ]; then echo CONFIG_BEGONIA_GPU_OC=y; else echo '# CONFIG_BEGONIA_GPU_OC is not set'; fi >> out/.config
+        if [ $GPU = oc ]; then echo CONFIG_BEGONIA_GPU_OC=y; else echo '# CONFIG_BEGONIA_GPU_OC is not set'; fi >> out/.config
         [ $POLLY = true ] || ./scripts/config --file out/.config --disable LLVM_POLLY
         [ $INLINE = true ] || ./scripts/config --file out/.config --disable INLINE_OPTIMIZATION
         [ $KSU = true ] || ./scripts/config --file out/.config --disable KSU   # SUSFS depends on it
@@ -127,7 +129,7 @@ jobs:
         assert d.unused_data[:4] == b'\xd0\x0d\xfe\xed', 'no DTB after the gzip stream'
         ver = re.search(rb'Linux version [^\n\x00]+', img).group(0).decode(); print(ver)
         import os
-        want = ('-PoxaSuzaku-OC' if '${{ matrix.variant }}' == 'oc' else '-PoxaSuzaku') + os.environ['TAG']
+        want = ('-PoxaSuzaku-OC' if os.environ['GPU'] == 'oc' else '-PoxaSuzaku') + os.environ['TAG']
         assert ver.split()[2].endswith(want), ver
         if os.environ['KSU'] == 'true':
             assert b'v4.2.0-rc1-023987f9@ReSukiSU' in img, 'not ReSukiSU v4.2.0-rc1 + su-compat fix'
@@ -142,7 +144,7 @@ jobs:
 
     - name: AnyKernel3 zip
       run: |
-        if [ "${{ matrix.variant }}" = rom ]; then
+        if [ $GPU = stock ]; then
           N=PoxaSuzaku; KS='PoxaSuzaku (Suzaku V2 + SchedAssist + ReSukiSU + SUSFS)'
         else
           N=PoxaSuzaku-OC; KS='PoxaSuzaku OC (Suzaku V2 + SchedAssist + ReSukiSU + SUSFS, personal build, GPU 850 MHz)'
