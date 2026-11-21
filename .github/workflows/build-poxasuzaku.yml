@@ -111,3 +111,18 @@ jobs:
       with:
         name: ${{ env.ZIP }}
         path: ${{ env.ZIP }}.zip
+
+    # Anonymous upload unless the repo has a GOFILE_TOKEN secret (gofile.io account API token);
+    # GOFILE_FOLDER (optional secret) puts every upload into one folder of that account.
+    - name: Upload to gofile
+      env:
+        GOFILE_TOKEN: ${{ secrets.GOFILE_TOKEN }}
+        GOFILE_FOLDER: ${{ secrets.GOFILE_FOLDER }}
+      run: |
+        A=(); [ -n "$GOFILE_TOKEN" ] && A+=(-H "Authorization: Bearer $GOFILE_TOKEN")
+        F=(); [ -n "$GOFILE_TOKEN" ] && [ -n "$GOFILE_FOLDER" ] && F+=(-F "folderId=$GOFILE_FOLDER")
+        R=$(curl -sS --retry 3 "${A[@]}" -F "file=@$ZIP.zip" "${F[@]}" https://upload.gofile.io/uploadfile)
+        URL=$(echo "$R" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["status"]=="ok", d; print(d["data"]["downloadPage"])') \
+          || { echo "::error::gofile upload failed: $R"; exit 1; }
+        echo "$ZIP.zip: $URL"
+        echo "**$ZIP.zip**: $URL  " >> $GITHUB_STEP_SUMMARY
