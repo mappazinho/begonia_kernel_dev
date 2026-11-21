@@ -15,10 +15,31 @@ on:
         required: false
         default: ''
         type: string
-
-concurrency:
-  group: poxasuzaku-${{ github.ref }}
-  cancel-in-progress: true
+      variants:
+        description: 'Kernels to build (JSON list)'
+        required: false
+        default: '["rom","oc"]'
+        type: string
+      # Bench knobs; the defaults are the release build. Anything else tags the kernel release
+      # and the zip name (e.g. -PoxaSuzaku-OC-a76), so the phone shows which variant runs.
+      mtune:
+        description: 'Instruction scheduling model (-mtune; -mcpu stays cortex-a55)'
+        type: choice
+        options: [cortex-a55, cortex-a76]
+        default: cortex-a55
+      opt:
+        description: 'Optimization level'
+        type: choice
+        options: [O3, O2]
+        default: O3
+      polly:
+        description: 'Polly loop optimizer (CONFIG_LLVM_POLLY)'
+        type: boolean
+        default: true
+      inline:
+        description: 'Raised inline thresholds (CONFIG_INLINE_OPTIMIZATION)'
+        type: boolean
+        default: true
 
 jobs:
   build:
@@ -27,7 +48,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        variant: [rom, oc]
+        variant: ${{ fromJSON(github.event.inputs.variants || '["rom","oc"]') }}
 
     steps:
     - uses: actions/checkout@v4
@@ -51,15 +72,31 @@ jobs:
         for t in clang ld.lld llvm-ar llvm-nm llvm-objcopy llvm-objdump llvm-strip; do sudo ln -sf /usr/bin/$t-18 /usr/local/bin/$t; done
         clang --version | head -1
 
+    - name: Bench knobs
+      run: |
+        MTUNE=${{ github.event.inputs.mtune || 'cortex-a55' }}; OPT=${{ github.event.inputs.opt || 'O3' }}
+        POLLY=${{ github.event.inputs.polly || 'true' }}; INLINE=${{ github.event.inputs.inline || 'true' }}
+        T=""
+        [ $MTUNE = cortex-a76 ] && T="$T-a76"
+        [ $OPT = O2 ] && T="$T-O2"
+        [ $POLLY = false ] && T="$T-nopolly"
+        [ $INLINE = false ] && T="$T-noinline"
+        echo "TAG=$T" >> $GITHUB_ENV
+        echo "POLLY=$POLLY" >> $GITHUB_ENV; echo "INLINE=$INLINE" >> $GITHUB_ENV
+        echo "KNOBS=POXA_MTUNE=$MTUNE POXA_OPT=-$OPT" >> $GITHUB_ENV
+        echo "variant tag: '${T:-none (release)}'  mtune=$MTUNE opt=-$OPT polly=$POLLY inline=$INLINE"
+
     - name: Configure
       run: |
-        if [ "${{ matrix.variant }}" = rom ]; then LV=-PoxaSuzaku; else LV=-PoxaSuzaku-OC; fi
+        if [ "${{ matrix.variant }}" = rom ]; then LV=-PoxaSuzaku$TAG; else LV=-PoxaSuzaku-OC$TAG; fi
         make O=out ARCH=arm64 LLVM=1 CC=clang begonia_user_defconfig
         sed -i -e '/^CONFIG_LOCALVERSION=/d' -e '/CONFIG_BEGONIA_GPU_OC/d' out/.config
         echo "CONFIG_LOCALVERSION=\"$LV\"" >> out/.config
         if [ "${{ matrix.variant }}" = oc ]; then echo CONFIG_BEGONIA_GPU_OC=y; else echo '# CONFIG_BEGONIA_GPU_OC is not set'; fi >> out/.config
+        [ $POLLY = true ] || ./scripts/config --file out/.config --disable LLVM_POLLY
+        [ $INLINE = true ] || ./scripts/config --file out/.config --disable INLINE_OPTIMIZATION
         make O=out ARCH=arm64 LLVM=1 CC=clang olddefconfig
-        grep -E 'CONFIG_(LOCALVERSION|BEGONIA_GPU_OC|CC_STACKPROTECTOR_STRONG|KSU|KSU_SUSFS|KSU_SUSFS_SUS_MOUNT|OPLUS_FEATURE_SCHED_ASSIST)[= ]|BEGONIA_GPU_OC is not' out/.config
+        grep -E 'CONFIG_(LOCALVERSION|BEGONIA_GPU_OC|CC_STACKPROTECTOR_STRONG|KSU|KSU_SUSFS|KSU_SUSFS_SUS_MOUNT|OPLUS_FEATURE_SCHED_ASSIST|LLVM_POLLY|INLINE_OPTIMIZATION)[= ]|(BEGONIA_GPU_OC|LLVM_POLLY|INLINE_OPTIMIZATION) is not' out/.config
         grep -q '^CONFIG_CC_STACKPROTECTOR_STRONG=y' out/.config
         ! grep -q '^CONFIG_KSU_SUSFS_SUS_MOUNT=y' out/.config
 
@@ -67,7 +104,9 @@ jobs:
       run: |
         make -j$(nproc) O=out ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- \
           LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip LLVM=1 LLVM_IAS=1 \
-          CFLAGS_KERNEL=-fintegrated-as CFLAGS_MODULE=-fintegrated-as
+          CFLAGS_KERNEL=-fintegrated-as CFLAGS_MODULE=-fintegrated-as $KNOBS
+        # the knobs really reached the compiler
+        grep -o -E -- '-O[23] |-mcpu=[^ ]+|-mtune=[^ ]+' out/kernel/.fork.o.cmd | sort -u
 
     - name: Check image
       run: |
@@ -77,7 +116,8 @@ jobs:
         d = zlib.decompressobj(16 + zlib.MAX_WBITS); img = d.decompress(k) + d.flush()
         assert d.unused_data[:4] == b'\xd0\x0d\xfe\xed', 'no DTB after the gzip stream'
         ver = re.search(rb'Linux version [^\n\x00]+', img).group(0).decode(); print(ver)
-        want = '-PoxaSuzaku-OC' if '${{ matrix.variant }}' == 'oc' else '-PoxaSuzaku'
+        import os
+        want = ('-PoxaSuzaku-OC' if '${{ matrix.variant }}' == 'oc' else '-PoxaSuzaku') + os.environ['TAG']
         assert ver.split()[2].endswith(want), ver
         assert b'v4.2.0-rc1-023987f9@ReSukiSU' in img, 'not ReSukiSU v4.2.0-rc1 + su-compat fix'
         assert b'susfs is initialized! version: v2.4.0' in img
@@ -94,7 +134,8 @@ jobs:
         else
           N=PoxaSuzaku-OC; KS='PoxaSuzaku OC (Suzaku V2 + SchedAssist + ReSukiSU + SUSFS, personal build, GPU 850 MHz)'
         fi
-        Z=$N-$(date -u +%Y%m%d)-${GITHUB_SHA::8}
+        [ -n "$TAG" ] && KS="$KS [bench variant ${TAG#-}]"
+        Z=$N$TAG-$(date -u +%Y%m%d)-${GITHUB_SHA::8}
         rm -rf AnyKernel3 && cp -a anykernel-template AnyKernel3
         sed -i "s|^kernel\.string=.*|kernel.string=$KS|" AnyKernel3/anykernel.sh
         cp out/arch/arm64/boot/Image.gz-dtb AnyKernel3/

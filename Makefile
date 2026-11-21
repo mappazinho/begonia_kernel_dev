@@ -718,12 +718,16 @@ KBUILD_CFLAGS	+= $(call cc-disable-warning, attribute-alias)
 ifdef CONFIG_CC_OPTIMIZE_FOR_SIZE
 KBUILD_CFLAGS   += -Os
 else
-KBUILD_CFLAGS   += -O3
+# PoxaSuzaku bench knobs (defaults = the release build): POXA_OPT=-O2, POXA_MTUNE=cortex-a76
+POXA_OPT	?= -O3
+POXA_MCPU	?= cortex-a55
+POXA_MTUNE	?= cortex-a55
+KBUILD_CFLAGS   += $(POXA_OPT)
 ifeq ($(cc-name),gcc)
 KBUILD_CFLAGS	+= -mcpu=cortex-a76.cortex-a55 -mtune=cortex-a76.cortex-a55
 endif
 ifeq ($(cc-name),clang)
-KBUILD_CFLAGS	+= -mcpu=cortex-a55 -mtune=cortex-a55
+KBUILD_CFLAGS	+= -mcpu=$(POXA_MCPU) -mtune=$(POXA_MTUNE)
 
 ifdef CONFIG_LLVM_POLLY
 KBUILD_CFLAGS	+= -mllvm -polly \
