@@ -3410,7 +3410,6 @@ static void binder_transaction(struct binder_proc *proc,
 
 	tcomplete = kmem_cache_zalloc(binder_work_pool, GFP_KERNEL);
 	trace_android_vh_binder_transaction_init(t);
-	tcomplete = kzalloc(sizeof(*tcomplete), GFP_KERNEL);
 	if (tcomplete == NULL) {
 		return_error = BR_FAILED_REPLY;
 		return_error_param = -ENOMEM;
