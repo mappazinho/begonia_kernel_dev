@@ -40,6 +40,10 @@ on:
         description: 'Raised inline thresholds (CONFIG_INLINE_OPTIMIZATION)'
         type: boolean
         default: true
+      ksu:
+        description: 'KernelSU (ReSukiSU) + SUSFS; off = no root in the kernel, tagged -noksu (NoMount stays on)'
+        type: boolean
+        default: true
 
 jobs:
   build:
@@ -76,11 +80,14 @@ jobs:
       run: |
         MTUNE=${{ github.event.inputs.mtune || 'cortex-a76' }}; OPT=${{ github.event.inputs.opt || 'O3' }}
         POLLY=${{ github.event.inputs.polly || 'true' }}; INLINE=${{ github.event.inputs.inline || 'true' }}
+        KSU=${{ github.event.inputs.ksu || 'true' }}
         T=""
         [ $MTUNE = cortex-a55 ] && T="$T-a55"
         [ $OPT = O2 ] && T="$T-O2"
         [ $POLLY = false ] && T="$T-nopolly"
         [ $INLINE = false ] && T="$T-noinline"
+        [ $KSU = false ] && T="$T-noksu"
+        echo "KSU=$KSU" >> $GITHUB_ENV
         echo "TAG=$T" >> $GITHUB_ENV
         echo "POLLY=$POLLY" >> $GITHUB_ENV; echo "INLINE=$INLINE" >> $GITHUB_ENV
         echo "KNOBS=POXA_MTUNE=$MTUNE POXA_OPT=-$OPT" >> $GITHUB_ENV
@@ -95,10 +102,13 @@ jobs:
         if [ "${{ matrix.variant }}" = oc ]; then echo CONFIG_BEGONIA_GPU_OC=y; else echo '# CONFIG_BEGONIA_GPU_OC is not set'; fi >> out/.config
         [ $POLLY = true ] || ./scripts/config --file out/.config --disable LLVM_POLLY
         [ $INLINE = true ] || ./scripts/config --file out/.config --disable INLINE_OPTIMIZATION
+        [ $KSU = true ] || ./scripts/config --file out/.config --disable KSU   # SUSFS depends on it
         make O=out ARCH=arm64 LLVM=1 CC=clang olddefconfig
         grep -E 'CONFIG_(LOCALVERSION|BEGONIA_GPU_OC|CC_STACKPROTECTOR_STRONG|KSU|KSU_SUSFS|KSU_SUSFS_SUS_MOUNT|OPLUS_FEATURE_SCHED_ASSIST|LLVM_POLLY|INLINE_OPTIMIZATION)[= ]|(BEGONIA_GPU_OC|LLVM_POLLY|INLINE_OPTIMIZATION) is not' out/.config
         grep -q '^CONFIG_CC_STACKPROTECTOR_STRONG=y' out/.config
         ! grep -q '^CONFIG_KSU_SUSFS_SUS_MOUNT=y' out/.config
+        grep -q '^CONFIG_NOMOUNT=y' out/.config || { echo "::error::CONFIG_NOMOUNT is off"; exit 1; }
+        if [ $KSU = true ]; then grep -q '^CONFIG_KSU_SUSFS=y' out/.config; else ! grep -q -E '^CONFIG_KSU(_SUSFS)?=y' out/.config; fi
 
     - name: Build
       run: |
@@ -119,8 +129,11 @@ jobs:
         import os
         want = ('-PoxaSuzaku-OC' if '${{ matrix.variant }}' == 'oc' else '-PoxaSuzaku') + os.environ['TAG']
         assert ver.split()[2].endswith(want), ver
-        assert b'v4.2.0-rc1-023987f9@ReSukiSU' in img, 'not ReSukiSU v4.2.0-rc1 + su-compat fix'
-        assert b'susfs is initialized! version: v2.4.0' in img
+        if os.environ['KSU'] == 'true':
+            assert b'v4.2.0-rc1-023987f9@ReSukiSU' in img, 'not ReSukiSU v4.2.0-rc1 + su-compat fix'
+            assert b'susfs is initialized! version: v2.4.0' in img
+        else:
+            assert b'@ReSukiSU' not in img and b'susfs is initialized' not in img, 'KernelSU/SUSFS in a no-KSU build'
         syms = {l.split('\t')[1] for l in open('out/Module.symvers') if '\t' in l}
         for s in ('__stack_chk_guard', '__stack_chk_fail', 'register_udc_functions', 'memset', 'printk'):
             assert s in syms, 'kernel does not export %s (udc_lib.ko would not load)' % s
@@ -134,7 +147,8 @@ jobs:
         else
           N=PoxaSuzaku-OC; KS='PoxaSuzaku OC (Suzaku V2 + SchedAssist + ReSukiSU + SUSFS, personal build, GPU 850 MHz)'
         fi
-        [ -n "$TAG" ] && KS="$KS [bench variant ${TAG#-}]"
+        [ $KSU = true ] || KS="${KS/ + ReSukiSU + SUSFS/, no KernelSU}"
+        [ -n "$TAG" ] && KS="$KS [variant ${TAG#-}]"
         Z=$N$TAG-$(date -u +%Y%m%d)-${GITHUB_SHA::8}
         rm -rf AnyKernel3 && cp -a anykernel-template AnyKernel3
         sed -i "s|^kernel\.string=.*|kernel.string=$KS|" AnyKernel3/anykernel.sh
