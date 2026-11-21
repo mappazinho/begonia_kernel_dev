@@ -1,4 +1,4 @@
 [submodule "KernelSU"]
 	path = KernelSU
-	url = https://github.com/ReSukiSU/ReSukiSU
-	branch = main
+	url = https://github.com/mappazinho/begonia_kernel_dev.git
+	branch = resukisu-sucompat
