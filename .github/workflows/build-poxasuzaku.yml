@@ -25,8 +25,8 @@ on:
       mtune:
         description: 'Instruction scheduling model (-mtune; -mcpu stays cortex-a55)'
         type: choice
-        options: [cortex-a55, cortex-a76]
-        default: cortex-a55
+        options: [cortex-a76, cortex-a55]
+        default: cortex-a76
       opt:
         description: 'Optimization level'
         type: choice
@@ -74,10 +74,10 @@ jobs:
 
     - name: Bench knobs
       run: |
-        MTUNE=${{ github.event.inputs.mtune || 'cortex-a55' }}; OPT=${{ github.event.inputs.opt || 'O3' }}
+        MTUNE=${{ github.event.inputs.mtune || 'cortex-a76' }}; OPT=${{ github.event.inputs.opt || 'O3' }}
         POLLY=${{ github.event.inputs.polly || 'true' }}; INLINE=${{ github.event.inputs.inline || 'true' }}
         T=""
-        [ $MTUNE = cortex-a76 ] && T="$T-a76"
+        [ $MTUNE = cortex-a55 ] && T="$T-a55"
         [ $OPT = O2 ] && T="$T-O2"
         [ $POLLY = false ] && T="$T-nopolly"
         [ $INLINE = false ] && T="$T-noinline"

@@ -718,10 +718,12 @@ KBUILD_CFLAGS	+= $(call cc-disable-warning, attribute-alias)
 ifdef CONFIG_CC_OPTIMIZE_FOR_SIZE
 KBUILD_CFLAGS   += -Os
 else
-# PoxaSuzaku bench knobs (defaults = the release build): POXA_OPT=-O2, POXA_MTUNE=cortex-a76
+# PoxaSuzaku bench knobs (defaults = the release build): POXA_OPT=-O2, POXA_MTUNE=cortex-a55
+# -mtune=cortex-a76 (scheduling model of the big cores; the ISA stays -mcpu=cortex-a55) since 2026-11-21:
+# kbench pipe round trips -15%, nothing measurably slower.
 POXA_OPT	?= -O3
 POXA_MCPU	?= cortex-a55
-POXA_MTUNE	?= cortex-a55
+POXA_MTUNE	?= cortex-a76
 KBUILD_CFLAGS   += $(POXA_OPT)
 ifeq ($(cc-name),gcc)
 KBUILD_CFLAGS	+= -mcpu=cortex-a76.cortex-a55 -mtune=cortex-a76.cortex-a55
