@@ -3728,7 +3728,9 @@ static int battery_callback(
 			/* START CHARGING */
 			fg_sw_bat_cycle_accu();
 			battery_main.CHG_FULL_STATUS = false;
-			battery_main.BAT_STATUS = POWER_SUPPLY_STATUS_CHARGING;
+			/* romtool: current_cmd "0 0" (charge limit resumed on unplug) also lands here */
+			battery_main.BAT_STATUS = mt_charger_plugin() ?
+				POWER_SUPPLY_STATUS_CHARGING : POWER_SUPPLY_STATUS_DISCHARGING;
 			battery_update(&battery_main);
 		}
 		break;
