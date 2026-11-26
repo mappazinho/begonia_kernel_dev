@@ -228,16 +228,30 @@ static struct DISP_DRE30_HIST g_aal_dre30_hist_db;
  * woken for each one: on a video-mode LCD that is 60 wakeups/s and ~14% of a
  * CPU core with the screen on, even on a static screen. Don't wake it when the
  * frame's global and DRE block histograms equal the last delivered ones and
- * its last outputs (SET_PARAM incl. DRE gains) were identical, i.e. it has
- * settled. Backlight changes (force_enable_irq / serviceFlags) and ESS/DRE
- * commands always wake it. aal_idle_skip=0 restores per-frame wakeups.
+ * the service has settled: it made no SET_PARAM call during the last
+ * AAL_IDLE_QUIET delivered frames (a settled service stops calling it). Any
+ * SET_PARAM call, backlight changes (force_enable_irq / serviceFlags) and
+ * ESS/DRE commands restart delivery, and one frame in AAL_IDLE_MAX_RUN is
+ * delivered anyway. aal_idle_skip=0 restores per-frame wakeups.
  */
 static u32 aal_idle_skip = 1;
 module_param(aal_idle_skip, uint, 0644);
 MODULE_PARM_DESC(aal_idle_skip, "skip AAL service wakeups on unchanged frames");
 static unsigned long aal_idle_skipped;
 module_param(aal_idle_skipped, ulong, 0444);
+/*
+ * Diagnostics (read-only): [0] histogram reads, [1] not stable, [2] serviceFlags
+ * set, [3] force_enable_irq, [4] backlight changed, [5] global hist changed,
+ * [6] DRE block hist changed, [7] set_param calls, [8] set_param changed,
+ * [9] DRE hist entries changed in the last differing read.
+ */
+static unsigned long aal_idle_why[10];
+module_param_array(aal_idle_why, ulong, NULL, 0444);
+#define AAL_IDLE_QUIET 30
+#define AAL_IDLE_MAX_RUN 60
+/* delivered frames since the last SET_PARAM call or kick (capped) */
 static atomic_t g_aal_idle_stable = ATOMIC_INIT(0);
+static unsigned int g_aal_idle_run;
 static unsigned int g_aal_idle_prev_max[AAL_HIST_BIN];
 static unsigned int g_aal_idle_prev_dre[AAL_DRE30_HIST_REGISTER_NUM];
 static int g_aal_idle_prev_bl = -1;
@@ -252,19 +266,41 @@ static inline void disp_aal_idle_kick(void)
 /* called with g_aal_hist_lock held, after a successful histogram read */
 static bool disp_aal_idle_should_skip(void)
 {
-	bool same = atomic_read(&g_aal_idle_stable) >= 2 &&
-		g_aal_hist.serviceFlags == 0 &&
-		atomic_read(&g_aal_force_enable_irq) == 0 &&
-		g_aal_hist.backlight == g_aal_idle_prev_bl &&
-		!memcmp(g_aal_idle_prev_max, g_aal_hist.maxHist,
-			sizeof(g_aal_idle_prev_max)) &&
-		!memcmp(g_aal_idle_prev_dre, g_aal_dre30_hist.dre_hist,
+	bool c1 = atomic_read(&g_aal_idle_stable) >= AAL_IDLE_QUIET &&
+		g_aal_idle_run < AAL_IDLE_MAX_RUN;
+	bool c2 = g_aal_hist.serviceFlags == 0;
+	bool c3 = atomic_read(&g_aal_force_enable_irq) == 0;
+	bool c4 = g_aal_hist.backlight == g_aal_idle_prev_bl;
+	bool c5 = !memcmp(g_aal_idle_prev_max, g_aal_hist.maxHist,
+			sizeof(g_aal_idle_prev_max));
+	bool c6 = !memcmp(g_aal_idle_prev_dre, g_aal_dre30_hist.dre_hist,
 			sizeof(g_aal_idle_prev_dre));
+	bool same = c1 && c2 && c3 && c4 && c5 && c6;
+
+	aal_idle_why[0]++;
+	aal_idle_why[1] += !c1;
+	aal_idle_why[2] += !c2;
+	aal_idle_why[3] += !c3;
+	aal_idle_why[4] += !c4;
+	aal_idle_why[5] += !c5;
+	if (!c6) {
+		int i, n = 0;
+
+		aal_idle_why[6]++;
+		for (i = 0; i < AAL_DRE30_HIST_REGISTER_NUM; i++)
+			n += g_aal_idle_prev_dre[i] !=
+				g_aal_dre30_hist.dre_hist[i];
+		aal_idle_why[9] = n;
+	}
 
 	if (same && aal_idle_skip) {
 		aal_idle_skipped++;
+		g_aal_idle_run++;
 		return true;
 	}
+	g_aal_idle_run = 0;
+	if (atomic_read(&g_aal_idle_stable) < AAL_IDLE_QUIET)
+		atomic_inc(&g_aal_idle_stable);
 	memcpy(g_aal_idle_prev_max, g_aal_hist.maxHist,
 		sizeof(g_aal_idle_prev_max));
 	memcpy(g_aal_idle_prev_dre, g_aal_dre30_hist.dre_hist,
@@ -1772,13 +1808,13 @@ int disp_aal_set_param(struct DISP_AAL_PARAM __user *param,
 
 		cmp.refreshLatency = 0;
 		cmp.dre30_gain = 0;
-		if (!memcmp(&g_aal_idle_prev_param, &cmp, sizeof(cmp)) &&
-		    !memcmp(g_aal_idle_prev_gain, g_aal_gain_db.dre30_gain,
+		aal_idle_why[7]++;
+		/* any call means the service is still adjusting */
+		atomic_set(&g_aal_idle_stable, 0);
+		if (memcmp(&g_aal_idle_prev_param, &cmp, sizeof(cmp)) ||
+		    memcmp(g_aal_idle_prev_gain, g_aal_gain_db.dre30_gain,
 			    sizeof(g_aal_idle_prev_gain))) {
-			if (atomic_read(&g_aal_idle_stable) < 2)
-				atomic_inc(&g_aal_idle_stable);
-		} else {
-			atomic_set(&g_aal_idle_stable, 0);
+			aal_idle_why[8]++;
 			memcpy(&g_aal_idle_prev_param, &cmp, sizeof(cmp));
 			memcpy(g_aal_idle_prev_gain, g_aal_gain_db.dre30_gain,
 				sizeof(g_aal_idle_prev_gain));
