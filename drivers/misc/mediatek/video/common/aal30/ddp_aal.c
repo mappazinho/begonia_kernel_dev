@@ -222,6 +222,57 @@ static struct DISP_DRE30_PARAM g_aal_gain_db;
 static struct DISP_DRE30_HIST g_aal_dre30_hist;
 static struct DISP_DRE30_HIST g_aal_dre30_hist_db;
 
+/*
+ * Static-frame skip (begonia, 2026-11-26). With DRE 3.0 the histogram is read
+ * at every start of frame and AALService (vendor PQ HAL, thread AALMain) is
+ * woken for each one: on a video-mode LCD that is 60 wakeups/s and ~14% of a
+ * CPU core with the screen on, even on a static screen. Don't wake it when the
+ * frame's global and DRE block histograms equal the last delivered ones and
+ * its last outputs (SET_PARAM incl. DRE gains) were identical, i.e. it has
+ * settled. Backlight changes (force_enable_irq / serviceFlags) and ESS/DRE
+ * commands always wake it. aal_idle_skip=0 restores per-frame wakeups.
+ */
+static u32 aal_idle_skip = 1;
+module_param(aal_idle_skip, uint, 0644);
+MODULE_PARM_DESC(aal_idle_skip, "skip AAL service wakeups on unchanged frames");
+static unsigned long aal_idle_skipped;
+module_param(aal_idle_skipped, ulong, 0444);
+static atomic_t g_aal_idle_stable = ATOMIC_INIT(0);
+static unsigned int g_aal_idle_prev_max[AAL_HIST_BIN];
+static unsigned int g_aal_idle_prev_dre[AAL_DRE30_HIST_REGISTER_NUM];
+static int g_aal_idle_prev_bl = -1;
+static struct DISP_AAL_PARAM g_aal_idle_prev_param;
+static unsigned int g_aal_idle_prev_gain[AAL_DRE30_GAIN_REGISTER_NUM];
+
+static inline void disp_aal_idle_kick(void)
+{
+	atomic_set(&g_aal_idle_stable, 0);
+}
+
+/* called with g_aal_hist_lock held, after a successful histogram read */
+static bool disp_aal_idle_should_skip(void)
+{
+	bool same = atomic_read(&g_aal_idle_stable) >= 2 &&
+		g_aal_hist.serviceFlags == 0 &&
+		atomic_read(&g_aal_force_enable_irq) == 0 &&
+		g_aal_hist.backlight == g_aal_idle_prev_bl &&
+		!memcmp(g_aal_idle_prev_max, g_aal_hist.maxHist,
+			sizeof(g_aal_idle_prev_max)) &&
+		!memcmp(g_aal_idle_prev_dre, g_aal_dre30_hist.dre_hist,
+			sizeof(g_aal_idle_prev_dre));
+
+	if (same && aal_idle_skip) {
+		aal_idle_skipped++;
+		return true;
+	}
+	memcpy(g_aal_idle_prev_max, g_aal_hist.maxHist,
+		sizeof(g_aal_idle_prev_max));
+	memcpy(g_aal_idle_prev_dre, g_aal_dre30_hist.dre_hist,
+		sizeof(g_aal_idle_prev_dre));
+	g_aal_idle_prev_bl = g_aal_hist.backlight;
+	return false;
+}
+
 static DECLARE_WAIT_QUEUE_HEAD(g_aal_size_wq);
 static bool g_aal_get_size_available;
 static struct DISP_AAL_DISPLAY_SIZE g_aal_size;
@@ -824,6 +875,8 @@ static void disp_aal_update_dre3_sram(enum DISP_MODULE_ENUM module,
 
 	if (spin_trylock_irqsave(&g_aal_hist_lock, flags)) {
 		result = disp_aal_read_dre3(dre_blk_x_num, dre_blk_y_num);
+		if (result && disp_aal_idle_should_skip())
+			result = false;
 		if (result) {
 			g_aal_dre30_hist.dre_blk_x_num = dre_blk_x_num;
 			g_aal_dre30_hist.dre_blk_y_num = dre_blk_y_num;
@@ -1436,6 +1489,9 @@ void disp_aal_notify_backlight_changed(int bl_1024)
 
 	/* pr_debug("disp_aal_notify_backlight_changed: %d/1023", bl_1024); */
 	disp_aal_notify_backlight_log(bl_1024);
+#ifdef CONFIG_MTK_DRE30_SUPPORT
+	disp_aal_idle_kick();
+#endif
 
 	disp_aal_exit_idle(__func__, 1);
 	#ifdef CONFIG_MACH_MT6785
@@ -1710,6 +1766,24 @@ int disp_aal_set_param(struct DISP_AAL_PARAM __user *param,
 		AAL_DBG("Set module(%d) parameter", module);
 		ret = disp_aal_write_param_to_reg(module, cmdq, &g_aal_param);
 		atomic_set(&g_aal_allowPartial, g_aal_param.allowPartial);
+#ifdef CONFIG_MTK_DRE30_SUPPORT
+		/* compare everything except the user pointer and latency */
+		struct DISP_AAL_PARAM cmp = g_aal_param;
+
+		cmp.refreshLatency = 0;
+		cmp.dre30_gain = 0;
+		if (!memcmp(&g_aal_idle_prev_param, &cmp, sizeof(cmp)) &&
+		    !memcmp(g_aal_idle_prev_gain, g_aal_gain_db.dre30_gain,
+			    sizeof(g_aal_idle_prev_gain))) {
+			if (atomic_read(&g_aal_idle_stable) < 2)
+				atomic_inc(&g_aal_idle_stable);
+		} else {
+			atomic_set(&g_aal_idle_stable, 0);
+			memcpy(&g_aal_idle_prev_param, &cmp, sizeof(cmp));
+			memcpy(g_aal_idle_prev_gain, g_aal_gain_db.dre30_gain,
+				sizeof(g_aal_idle_prev_gain));
+		}
+#endif
 	}
 
 	if (atomic_read(&g_aal_backlight_notified) == 0)
@@ -2542,6 +2616,9 @@ void disp_aal_set_ess_level_impl(int level, int need_kick)
 	g_aal_ess_level = level_command;
 
 	spin_unlock_irqrestore(&g_aal_hist_lock, flags);
+#ifdef CONFIG_MTK_DRE30_SUPPORT
+	disp_aal_idle_kick();
+#endif
 
 	disp_aal_exit_idle(__func__, need_kick);
 	disp_aal_set_interrupt(1);
@@ -2573,6 +2650,9 @@ void disp_aal_set_ess_en(int enable)
 	g_aal_ess_en = enable_command;
 
 	spin_unlock_irqrestore(&g_aal_hist_lock, flags);
+#ifdef CONFIG_MTK_DRE30_SUPPORT
+	disp_aal_idle_kick();
+#endif
 
 	disp_aal_exit_idle(__func__, 1);
 	disp_aal_set_interrupt(1);
@@ -2599,6 +2679,9 @@ void disp_aal_set_dre_en(int enable)
 	g_aal_dre_en = enable_command;
 
 	spin_unlock_irqrestore(&g_aal_hist_lock, flags);
+#ifdef CONFIG_MTK_DRE30_SUPPORT
+	disp_aal_idle_kick();
+#endif
 
 	disp_aal_exit_idle(__func__, 1);
 	disp_aal_set_interrupt(1);
