@@ -30,16 +30,34 @@
  * still ramps up (~110 -> ~137 within 300 ms), so near ends up below the
  * steady uncovered reading and the sensor reports "near" until it is switched
  * off again (in calls: screen stays off). Calibration does not help: the
- * firmware re-derives the thresholds at power-on either way. Re-sending fixed
+ * firmware re-derives the thresholds at power-on either way. Re-sending
  * thresholds through the hub's cfg path after power-on (slots 3/4: low, high)
- * makes the chip's own interrupts and wakeups follow them. Measured raw on the
- * owner's phone: uncovered 132-141, ear 171-180, hand at 3 cm 149-159.
- * 0 disables the override.
+ * makes the chip's own interrupts and wakeups follow them.
+ *
+ * The uncovered reading (crosstalk through the cover glass) differs between
+ * phones and screen protectors: fixed thresholds from one phone (uncovered
+ * 132-141, near 160) left another phone "near" all the time (AOD hidden after
+ * 1 s). So the thresholds follow ps_floor, the lowest steady reading seen:
+ * near = floor + ps_near_margin, far = floor + ps_far_margin. Readings are
+ * taken from 1 s after power-on (the ramp is over by then) while the sensor is
+ * on. The first reading sets the floor; after that it drops by at most 10 per
+ * session (one odd low reading, e.g. in sunlight, can't leave the sensor near
+ * for good) and rises by 1 per session whose lowest reading stayed above it
+ * (new screen protector, dirt). Before the first reading the
+ * hub's own thresholds stay. ps_fixed_near/far > 0 override all of this.
+ * ps_floor can be read, or written (0 = learn again).
+ * Owner's phone: uncovered 132-141, ear 171-180, hand at 3 cm 149-159.
  */
-static int ps_fixed_near = 160;
-static int ps_fixed_far = 148;
+static int ps_fixed_near;
+static int ps_fixed_far;
+static int ps_floor;
+static int ps_near_margin = 25;
+static int ps_far_margin = 12;
 module_param(ps_fixed_near, int, 0644);
 module_param(ps_fixed_far, int, 0644);
+module_param(ps_floor, int, 0644);
+module_param(ps_near_margin, int, 0644);
+module_param(ps_far_margin, int, 0644);
 
 #define XIAOMI_FACTORY_CALIBRATION 1
 #define ALS_CALI_INFO_SET_SCALE 0
@@ -86,6 +104,9 @@ struct alspshub_ipi_data {
 	struct work_struct cabc_notify_work;
 	struct delayed_work ps_thd_work;
 	int ps_thd_round;
+	int ps_sess_min;	/* lowest steady reading this session, INT_MAX = none */
+	int ps_sess_floor;	/* ps_floor when this session started */
+	int ps_thd_sent_near, ps_thd_sent_far;
 	int16_t cabc_backlight_value;
 };
 
@@ -989,29 +1010,71 @@ static int ps_open_report_data(int open)
 	return 0;
 }
 
-static void ps_thd_work_func(struct work_struct *work)
+static void ps_thd_send(struct alspshub_ipi_data *obj, int near, int far,
+	int raw)
 {
-	struct alspshub_ipi_data *obj = container_of(to_delayed_work(work),
-		struct alspshub_ipi_data, ps_thd_work);
 	int32_t cfg[4];
-	int near = READ_ONCE(ps_fixed_near), far = READ_ONCE(ps_fixed_far);
 
-	if (!READ_ONCE(obj->ps_android_enable) || near <= 0 || far <= 0 ||
-	    far >= near)
-		return;
 	cfg[0] = near;
 	cfg[1] = far;
 	cfg[2] = far;
 	cfg[3] = near;
-	if (sensor_cfg_to_hub(ID_PROXIMITY, (uint8_t *)cfg, sizeof(cfg)) < 0)
-		pr_err("ps fixed thresholds: cfg to hub failed\n");
-	else
-		pr_info("ps fixed thresholds: near %d far %d (round %d)\n",
-			near, far, obj->ps_thd_round);
-	/* again after 1 s in case the hub's power-on setting came late */
-	if (obj->ps_thd_round++ == 0)
-		schedule_delayed_work(&obj->ps_thd_work,
-			msecs_to_jiffies(700));
+	if (sensor_cfg_to_hub(ID_PROXIMITY, (uint8_t *)cfg, sizeof(cfg)) < 0) {
+		pr_err("ps thresholds: cfg to hub failed\n");
+		return;
+	}
+	obj->ps_thd_sent_near = near;
+	obj->ps_thd_sent_far = far;
+	pr_info("ps thresholds: near %d far %d (floor %d raw %d round %d)\n",
+		near, far, READ_ONCE(ps_floor), raw, obj->ps_thd_round);
+}
+
+static void ps_thd_work_func(struct work_struct *work)
+{
+	struct alspshub_ipi_data *obj = container_of(to_delayed_work(work),
+		struct alspshub_ipi_data, ps_thd_work);
+	struct data_unit_t data_t;
+	int round = obj->ps_thd_round;
+	int near = READ_ONCE(ps_fixed_near), far = READ_ONCE(ps_fixed_far);
+	int raw = -1, floor;
+	/* rounds at 0.3, 1, 2, 4 s after power-on, then every 10 s */
+	static const unsigned int next_ms[] = { 700, 1000, 2000, 6000 };
+
+	if (!READ_ONCE(obj->ps_android_enable))
+		return;
+	obj->ps_thd_round = round + 1;
+	if (near > 0 && far > 0 && far < near) {
+		/* fixed override: only right after power-on */
+		if (round <= 1)
+			ps_thd_send(obj, near, far, -1);
+		if (round == 0)
+			schedule_delayed_work(&obj->ps_thd_work,
+				msecs_to_jiffies(next_ms[0]));
+		return;
+	}
+	if (round >= 1 && sensor_get_data_from_hub(ID_PROXIMITY, &data_t) >= 0)
+		raw = data_t.proximity_t.steps;
+	if (raw > 20 && raw < 4000) {
+		if (raw < obj->ps_sess_min)
+			obj->ps_sess_min = raw;
+		floor = READ_ONCE(ps_floor);
+		if (floor <= 0)
+			WRITE_ONCE(ps_floor, raw);
+		else if (raw < floor)
+			WRITE_ONCE(ps_floor, max(raw, obj->ps_sess_floor > 0 ?
+				obj->ps_sess_floor - 10 : raw));
+	}
+	floor = READ_ONCE(ps_floor);
+	if (floor > 0) {
+		near = floor + READ_ONCE(ps_near_margin);
+		far = floor + READ_ONCE(ps_far_margin);
+		/* the hub resets them at power-on: always send in rounds 0/1 */
+		if (far < near && (round <= 1 || near != obj->ps_thd_sent_near ||
+				   far != obj->ps_thd_sent_far))
+			ps_thd_send(obj, near, far, raw);
+	}
+	schedule_delayed_work(&obj->ps_thd_work, msecs_to_jiffies(
+		round < ARRAY_SIZE(next_ms) ? next_ms[round] : 10000));
 }
 
 static int ps_enable_nodata(int en)
@@ -1033,8 +1096,19 @@ static int ps_enable_nodata(int en)
 
 	if (en) {
 		obj->ps_thd_round = 0;
+		obj->ps_sess_min = INT_MAX;
+		obj->ps_sess_floor = READ_ONCE(ps_floor);
 		mod_delayed_work(system_wq, &obj->ps_thd_work,
 			msecs_to_jiffies(300));
+	} else {
+		int floor = READ_ONCE(ps_floor);
+
+		cancel_delayed_work(&obj->ps_thd_work);
+		/* let the floor follow a reading that went up (protector, dirt) */
+		if (floor > 0 && obj->ps_sess_min != INT_MAX &&
+		    obj->ps_sess_min > floor)
+			WRITE_ONCE(ps_floor, floor + 1);
+		obj->ps_sess_min = INT_MAX;
 	}
 
 	mutex_lock(&alspshub_mutex);
@@ -1170,6 +1244,7 @@ static int alspshub_probe(struct platform_device *pdev)
 	INIT_WORK(&obj->init_done_work, alspshub_init_done_work);
 	INIT_WORK(&obj->cabc_notify_work, cabc_backlight_value_notification_work);
 	INIT_DELAYED_WORK(&obj->ps_thd_work, ps_thd_work_func);
+	obj->ps_sess_min = INT_MAX;
 	obj->cabc_backlight_value = -1;
 
 	platform_set_drvdata(pdev, obj);
