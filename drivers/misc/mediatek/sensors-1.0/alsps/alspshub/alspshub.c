@@ -21,25 +21,6 @@
 #include <SCP_sensorHub.h>
 #include "SCP_power_monitor.h"
 #include <linux/pm_wakeup.h>
-#include <linux/workqueue.h>
-#include <linux/moduleparam.h>
-
-/*
- * begonia STK3332: at every power-on the SCP hub firmware sets the proximity
- * thresholds from its first sample (+5..+20), which is taken while the reading
- * still ramps up (~110 -> ~137 within 300 ms), so near ends up below the
- * steady uncovered reading and the sensor reports "near" until it is switched
- * off again (in calls: screen stays off). Calibration does not help: the
- * firmware re-derives the thresholds at power-on either way. Re-sending fixed
- * thresholds through the hub's cfg path after power-on (slots 3/4: low, high)
- * makes the chip's own interrupts and wakeups follow them. Measured raw on the
- * owner's phone: uncovered 132-141, ear 171-180, hand at 3 cm 149-159.
- * 0 disables the override.
- */
-static int ps_fixed_near = 160;
-static int ps_fixed_far = 148;
-module_param(ps_fixed_near, int, 0644);
-module_param(ps_fixed_far, int, 0644);
 
 #define XIAOMI_FACTORY_CALIBRATION 1
 #define ALS_CALI_INFO_SET_SCALE 0
@@ -84,8 +65,6 @@ struct alspshub_ipi_data {
 	struct completion ps_calibration_done;
 
 	struct work_struct cabc_notify_work;
-	struct delayed_work ps_thd_work;
-	int ps_thd_round;
 	int16_t cabc_backlight_value;
 };
 
@@ -989,31 +968,6 @@ static int ps_open_report_data(int open)
 	return 0;
 }
 
-static void ps_thd_work_func(struct work_struct *work)
-{
-	struct alspshub_ipi_data *obj = container_of(to_delayed_work(work),
-		struct alspshub_ipi_data, ps_thd_work);
-	int32_t cfg[4];
-	int near = READ_ONCE(ps_fixed_near), far = READ_ONCE(ps_fixed_far);
-
-	if (!READ_ONCE(obj->ps_android_enable) || near <= 0 || far <= 0 ||
-	    far >= near)
-		return;
-	cfg[0] = near;
-	cfg[1] = far;
-	cfg[2] = far;
-	cfg[3] = near;
-	if (sensor_cfg_to_hub(ID_PROXIMITY, (uint8_t *)cfg, sizeof(cfg)) < 0)
-		pr_err("ps fixed thresholds: cfg to hub failed\n");
-	else
-		pr_info("ps fixed thresholds: near %d far %d (round %d)\n",
-			near, far, obj->ps_thd_round);
-	/* again after 1 s in case the hub's power-on setting came late */
-	if (obj->ps_thd_round++ == 0)
-		schedule_delayed_work(&obj->ps_thd_work,
-			msecs_to_jiffies(700));
-}
-
 static int ps_enable_nodata(int en)
 {
 	int res = 0;
@@ -1029,12 +983,6 @@ static int ps_enable_nodata(int en)
 	if (res < 0) {
 		pr_err("als_enable_nodata is failed!!\n");
 		return -1;
-	}
-
-	if (en) {
-		obj->ps_thd_round = 0;
-		mod_delayed_work(system_wq, &obj->ps_thd_work,
-			msecs_to_jiffies(300));
 	}
 
 	mutex_lock(&alspshub_mutex);
@@ -1169,7 +1117,6 @@ static int alspshub_probe(struct platform_device *pdev)
 
 	INIT_WORK(&obj->init_done_work, alspshub_init_done_work);
 	INIT_WORK(&obj->cabc_notify_work, cabc_backlight_value_notification_work);
-	INIT_DELAYED_WORK(&obj->ps_thd_work, ps_thd_work_func);
 	obj->cabc_backlight_value = -1;
 
 	platform_set_drvdata(pdev, obj);
